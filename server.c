@@ -11,7 +11,7 @@
 
 void *server_thread (void *arg)
 {
-    int         ret             = 0, i = 0, n = 0;
+    int         ret             = 0, i = 0;
     long        thread_id       = (long) arg;
     int         num_concurr_msgs= config_info.num_concurr_msgs;
     int         msg_size        = config_info.msg_size;
@@ -81,7 +81,7 @@ void *server_thread (void *arg)
             gettimeofday (&start, NULL);
         }
 
-	n = ibv_poll_cq (cq, num_wc, wc);
+	(void) ibv_poll_cq (cq, num_wc, wc);
 	debug ("ops_count = %ld", ops_count);
     }
     gettimeofday (&end, NULL);

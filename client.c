@@ -11,7 +11,7 @@
 
 void *client_thread_func (void *arg)
 {
-    int         ret		 = 0, n = 0;
+    int         ret		 = 0;
     long	thread_id	 = (long) arg;
     int         msg_size	 = config_info.msg_size;
 
@@ -74,7 +74,7 @@ void *client_thread_func (void *arg)
 	    gettimeofday (&start, NULL);
 	}
 
-	n = ibv_poll_cq (cq, num_wc, wc);
+	(void) ibv_poll_cq (cq, num_wc, wc);
 	debug ("ops_count = %ld", ops_count);
     }
 
