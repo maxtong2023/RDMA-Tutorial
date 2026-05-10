@@ -1,6 +1,15 @@
 #include <arpa/inet.h>
 #include <unistd.h>
 #include <malloc.h>
+#include <stdlib.h>
+#include <string.h>
+
+#ifndef MIN
+#define MIN(a, b) ((a) < (b) ? (a) : (b))
+#endif
+#ifndef MAX
+#define MAX(a, b) ((a) > (b) ? (a) : (b))
+#endif
 
 #include "sock.h"
 #include "ib.h"
@@ -252,9 +261,29 @@ int setup_ib ()
     /* get IB device list */
     dev_list = ibv_get_device_list(NULL);
     check(dev_list != NULL, "Failed to get ib device list.");
+    check(dev_list[0] != NULL, "No RDMA devices found.");
 
-    /* create IB context */
-    ib_res.ctx = ibv_open_device(*dev_list);
+    /* Prefer mlx5 NIC matching ibstat name, e.g. export RDMA_DEVICE=ibp1s0 */
+    {
+	struct ibv_device *dev = NULL;
+	const char       *pick = getenv ("RDMA_DEVICE");
+
+	if (pick != NULL && pick[0] != '\0') {
+	    for (i = 0; dev_list[i] != NULL; i++) {
+		if (strcmp (ibv_get_device_name (dev_list[i]), pick) == 0) {
+		    dev = dev_list[i];
+		    break;
+		}
+	    }
+	    check (dev != NULL,
+		   "No IB device named \"%s\" (see ibv_devinfo -l; try RDMA_DEVICE=...)",
+		   pick);
+	} else {
+	    dev = dev_list[0];
+	}
+
+	ib_res.ctx = ibv_open_device (dev);
+    }
     check(ib_res.ctx != NULL, "Failed to open ib device.");
 
     /* allocate protection domain */
@@ -285,40 +314,66 @@ int setup_ib ()
     ret = ibv_query_device(ib_res.ctx, &ib_res.dev_attr);
     check(ret==0, "Failed to query device");
     
-    /* create cq */
-    ib_res.cq = ibv_create_cq (ib_res.ctx, ib_res.dev_attr.max_cqe, 
-			       NULL, NULL, 0);
+    /* Cap CQ depth: huge max_cqe from ibv_query_device can make ibv_create_cq fail */
+    {
+	int cqe = ib_res.dev_attr.max_cqe;
+
+	if (cqe < 1024) {
+	    cqe = 1024;
+	}
+	if (cqe > 1048576) {
+	    cqe = 1048576;
+	}
+	ib_res.cq = ibv_create_cq (ib_res.ctx, cqe, NULL, NULL, 0);
+    }
     check (ib_res.cq != NULL, "Failed to create cq");
 
     /* create srq */
-    struct ibv_srq_init_attr srq_init_attr = {
-	.attr.max_wr  = ib_res.dev_attr.max_srq_wr,
-	.attr.max_sge = 1,
-    };
+    {
+	struct ibv_srq_init_attr srq_init_attr;
+	uint32_t               srq_wr = ib_res.dev_attr.max_srq_wr;
 
-    ib_res.srq = ibv_create_srq (ib_res.pd, &srq_init_attr);
+	memset (&srq_init_attr, 0, sizeof (srq_init_attr));
+	/* SRQ depth: clamp; 0 from driver would be invalid */
+	srq_wr = MAX (srq_wr, 128u);
+	srq_wr = MIN (srq_wr, 65536u);
+	srq_init_attr.attr.max_wr  = srq_wr;
+	srq_init_attr.attr.max_sge = 1;
 
-    /* create qp */
-    struct ibv_qp_init_attr qp_init_attr = {
-        .send_cq = ib_res.cq,
-        .recv_cq = ib_res.cq,
-	.srq     = ib_res.srq,
-        .cap = {
-            .max_send_wr = ib_res.dev_attr.max_qp_wr,
-            .max_recv_wr = ib_res.dev_attr.max_qp_wr,
-            .max_send_sge = 1,
-            .max_recv_sge = 1,
-        },
-        .qp_type = IBV_QPT_RC,
-    };
+	ib_res.srq = ibv_create_srq (ib_res.pd, &srq_init_attr);
+    }
+    check (ib_res.srq != NULL, "Failed to create srq");
 
-    ib_res.qp = (struct ibv_qp **) calloc (ib_res.num_qps, 
-					   sizeof(struct ibv_qp *));
-    check (ib_res.qp != NULL, "Failed to allocate qp");
+    /* create qp
+     * If .srq is set, recv WRs live on the SRQ only; per-QP max_recv_wr must be 0
+     * (otherwise ibv_create_qp fails with EINVAL on mlx5 and others).
+     * Cap max_send_wr: some kernels reject very large send queues from max_qp_wr.
+     */
+    {
+	struct ibv_qp_init_attr qp_init_attr;
+	uint32_t                send_wr = ib_res.dev_attr.max_qp_wr;
 
-    for (i = 0; i < ib_res.num_qps; i++) {
-	ib_res.qp[i] = ibv_create_qp (ib_res.pd, &qp_init_attr);
-	check (ib_res.qp[i] != NULL, "Failed to create qp[%d]", i);
+	memset (&qp_init_attr, 0, sizeof (qp_init_attr));
+	send_wr = MAX (send_wr, 1u);
+	send_wr = MIN (send_wr, 4096u);
+
+	qp_init_attr.send_cq = ib_res.cq;
+	qp_init_attr.recv_cq = ib_res.cq;
+	qp_init_attr.srq     = ib_res.srq;
+	qp_init_attr.cap.max_send_wr  = send_wr;
+	qp_init_attr.cap.max_recv_wr  = 0;
+	qp_init_attr.cap.max_send_sge = 1;
+	qp_init_attr.cap.max_recv_sge = 1;
+	qp_init_attr.qp_type = IBV_QPT_RC;
+
+	ib_res.qp = (struct ibv_qp **) calloc (ib_res.num_qps,
+						sizeof (struct ibv_qp *));
+	check (ib_res.qp != NULL, "Failed to allocate qp");
+
+	for (i = 0; i < ib_res.num_qps; i++) {
+	    ib_res.qp[i] = ibv_create_qp (ib_res.pd, &qp_init_attr);
+	    check (ib_res.qp[i] != NULL, "Failed to create qp[%d]", i);
+	}
     }
 
     /* connect QP */
