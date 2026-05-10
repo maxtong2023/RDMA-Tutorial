@@ -96,13 +96,14 @@ int get_rank ()
     uint32_t		num_servers = config_info.num_servers;
     uint32_t		num_clients = config_info.num_clients;
     struct utsname	utsname_buf;
-    char		hostname[64];
+    /* +1: utsname.nodename may be 64 chars; need space for trailing '\0' */
+    char		hostname[65];
 
     /* get hostname */
     ret = uname (&utsname_buf);
     check (ret == 0, "Failed to call uname");
 
-    strncpy (hostname, utsname_buf.nodename, sizeof(hostname));
+    snprintf (hostname, sizeof(hostname), "%s", utsname_buf.nodename);
 
     config_info.rank = -1;
     for (i = 0; i < num_servers; i++) {
