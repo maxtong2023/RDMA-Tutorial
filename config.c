@@ -77,7 +77,8 @@ int parse_node_list (char *line, char ***node_list)
         if (strstr(node_name_prefix, "mnemosyne")) {
             sprintf ((*node_list)[k], "mnemosyne%02d", node_ind);
         } else {
-            sprintf ((*node_list)[k], "saguaro%d", node_ind);
+            /* e.g. line "inf1..2" -> prefix "inf", hosts inf1, inf2 */
+            sprintf ((*node_list)[k], "%s%d", node_name_prefix, node_ind);
         }
 
         node_ind += 1;
